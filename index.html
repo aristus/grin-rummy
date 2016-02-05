@@ -1,0 +1,578 @@
+
+<html>
+  <head>
+<script>
+/**
+An implementation of "Churchill Solitaire", as designed by Donald Rumsfeld, in Javascript.
+I did this mostly for fun and because my desk isn't big enough to hold a full game.
+There are no outside styles, images, or dependencies. All native HTML5-ish stuff.
+
+Feature wise it's about half done. There is no Undo, no Auto-Play, no winimations, no hints.
+
+I have to say that this game is brutal. It was easier to write than to play!
+
+//generate cards, keep identity.
+
+// fill in initial board
+
+game restart (F5?)
+
+//drag + drop (including stacks)
+
+// reveal down cards
+
+// deal new cards (king rule unclear)
+
+// legal moves (?)
+
+undo (?)
+
+// snap-to
+
+detect gameover
+
+winimation
+
+auto-play
+
+save game (cookies?)
+
+// WONTFIX card backs, configurable?
+
+// double-click to place automatically.
+
+// animations on draw and flip
+
+// indicate ordered spreads, somehow.
+
+fix .card_data bug (use hash table keyed to id)
+
+hints
+
+help text
+
+RULES
+
+The Devil's Six cards (known unknowns) must be moved directly to the Victory Piles (known knowns). They cannot be played on the stacks below.
+
+When drawing a new card, you add one to the bottom of each column which is not headed by a King.
+
+drop rules:
+
+on a blank spread, only king
+devil's cards can only be dropped on the victory pile
+on victory pile, suit and order match
+on a spread, topmost card being dropped must be one less and oppo color
+
+*/
+
+var decks = ['a', 'b']; // doesn't make a difference to appearance
+var values = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+var suits = ['spades', 'hearts', 'clubs', 'diams'];
+var colors = {
+  'hearts': 'red',
+  'diams': 'red',
+  'spades': 'black',
+  'clubs': 'black'
+};
+
+// keep track of kk piles for auto-placing cards.
+var known_knowns = {};
+
+function shuffle(a) {
+  var n = a.length;
+  var tmp, idx;
+  while (n) {
+    idx = Math.floor(Math.random() * n--);
+    t = a[n];
+    a[n] = a[idx];
+    a[idx] = t;
+  }
+  return a;
+}
+
+function init_cards() {
+  var cards = [];
+  for (var d = 0; d < decks.length; d++) {
+    for (var v = 0; v < values.length; v++) {
+       for (var s = 0; s < suits.length; s++) {
+          cards.push({
+            'id': decks[d] + '-' + values[v] + '-' + suits[s],
+            'deck': decks[d],
+            'value': values[v],
+            'suit': suits[s],
+            'color': colors[suits[s]],
+            'intvalue': v
+          });
+       }
+    }
+  }
+  return shuffle(cards);
+}
+
+function init_board() {
+  // global, because that's how I roll.
+  cards = init_cards();
+
+  // place the "devil's 6" aka "known unknowns"
+  for (var i = 0; i < 6; i++) {
+    var target = document.getElementById('ku-' + i);
+    var card = place_card(target, true);
+    //remove drag action. only double-click to place in known-knowns pile.
+    card.ondragstart = undefined;
+    card.draggable = false;
+  }
+
+  // place initial card spreads in the tableau area.
+  var layout = [0, 1, 2, 3, 4, 4, 3, 2, 1, 0];
+  for (var i = 0; i < 10; i++) {
+    var target = document.getElementById('uk-' + i);
+
+    // first, set "card data" of the drop targets for validation.
+    target.card_data = {
+      'suit': 'none',
+      'intvalue': 13
+    }
+
+    for (var j = 0; j < layout[i]; j++) {
+      target = place_card(target, false);
+    }
+    place_card(target, true);
+
+  }
+
+  // set "card data" of the known known drop targets, for validation.
+  for (var i = 0; i < 8; i++) {
+    var target = document.getElementById('kk-' + i);
+    target.card_data = {
+      'suit': suits[i % 4],
+      'intvalue': -1
+    }
+
+    // for auto-place
+    target.className += ' ' + suits[i % 4];
+  }
+}
+
+// Victory Pile, aka known knowns
+function dragover_handler_kk(ev) {
+  // recurse to find real drop target
+  var target = ev.target;
+  while (!target.classList.contains('drop-target')) {
+    target = target.parentNode;
+  }
+
+  // validity check. Only the same suit and one value up can be placed. the "blanks" get a value of -1
+  var card = document.getElementById(ev.dataTransfer.getData("text"));
+  if (card.card_data.suit != target.card_data.suit || card.card_data.intvalue - 1 != target.card_data.intvalue) {
+    ev.dataTransfer.dropEffect = 'none';
+    return true;
+  }
+  ev.preventDefault();
+}
+
+// tableau, or spreads, aka unknown knowns
+function dragover_handler_uk(ev) {
+  // recurse to find real drop target
+  var target = ev.target;
+  while (!target.classList.contains('drop-target')) {
+    target = target.parentNode;
+  }
+
+  // validity check. Only alternating color and one value down can be placed. Special case of King on empty.
+  var card = document.getElementById(ev.dataTransfer.getData("text"));
+  if (card.card_data.suit == target.card_data.suit || card.card_data.intvalue + 1 != target.card_data.intvalue) {
+    ev.dataTransfer.dropEffect = 'none';
+    return true;
+  }
+  ev.preventDefault();
+}
+
+
+//function dragleave_handler_kk(ev) {
+//  ev.target.style.background = "transparent";
+//  ev.preventDefault();
+//}
+
+
+function dragover_handler(ev) {
+  // todo: validity checks
+  //ev.target.style.background = "#eee";
+  ev.preventDefault();
+}
+
+function dragleave_handler(ev) {
+  //ev.target.style.background = "transparent";
+  ev.preventDefault();
+}
+
+function dragstart_handler(ev) {
+  ev.dataTransfer.setData("text/plain", ev.target.id);
+}
+
+function drop_handler(ev, spread) {
+  ev.preventDefault();
+
+  // stupidly, the drop target can be an element inside the intended one,
+  // eg inside another card. so recurse up until you find the right element.
+  var target = ev.target;
+  while (!target.classList.contains('drop-target')) {
+    target = target.parentNode;
+  }
+
+  //todo: make sure you are dropping on the last card in a spread, not the random card you dropped onto.
+
+  var card = document.getElementById(ev.dataTransfer.getData("text"));
+  card.style.background = '#eee';
+  card.style['box-shadow'] = "";
+  target.appendChild(card);
+
+  // check for exposed cards
+  flip_cards();
+  color_sequences();
+}
+
+// get it? draw... cards? hee!
+function draw_cards(ev) {
+  var blanks = document.querySelectorAll('#unknown-knowns .blank');
+  for (var i = 0; i < blanks.length; i++) {
+    var spread = blanks[i];
+    var c = spread.querySelectorAll('.up');
+
+    // If there is no King face up at the start of the spread, place a new card on the end
+    if (!c || c.length == 0) {
+      place_card(spread, true);
+    } else if (!c[0].classList.contains('value-K')) {
+      place_card(c[c.length-1], true);
+    }
+  }
+  color_sequences();
+}
+
+
+//todo: refactor
+function provision_up_card(card) {
+    var c = card.card_data;
+    var cn = 'drop-target card up value-' + c.value + " " + c.suit;
+    card.className = cn + ' hidden';
+    card.innerHTML = '<span class="top">' + c.value + '&' + c.suit + ';</span><span class="bottom">' + c.value + '&' + c.suit + ';</span>';
+    card.draggable = "true";
+    card.ondragstart = dragstart_handler;
+    card.ondblclick = auto_place;
+
+    // fade in animation
+    window.setTimeout(function() {
+      card.className = cn + " visible";
+    }, 100);
+
+    return card;
+}
+
+// There are better ways to do this, of course.
+function flip_cards() {
+  var downs = document.querySelectorAll('#unknown-knowns .down');
+  for (var i = 0; i < downs.length; i++) {
+    var d = downs[i];
+    if (d.querySelectorAll('.down').length > 0 || d.querySelectorAll('.up').length > 0) {
+      continue;
+    }
+    provision_up_card(d);
+    return;
+  }
+}
+
+// Use bg gradient and shadow to indicate broken sequences.
+function color_sequences() {
+  var ups = document.querySelectorAll('#unknown-knowns .up');
+  for (var i = 0; i < ups.length; i++) {
+    var c = ups[i];
+    var p = c.parentNode;
+    if (p.card_data && p.classList.contains('up')) {
+      var in_seq = (c.card_data.color != p.card_data.color && p.card_data.intvalue - c.card_data.intvalue == 1);
+      c.style.background = in_seq ? "#fff" : "linear-gradient(#ffc, #fff, #fff, #fff, #fff, #fff, #fff)";
+      c.style['box-shadow'] = in_seq? "" : "0px -1px 2px #999";
+    }
+  }
+}
+
+function place_card(target, up) {
+  if (cards.length < 1) {
+    document.getElementById('stack').style.display = 'none';
+    return;
+  }
+
+  var new_card = cards.pop();
+  var e = document.createElement('div');
+  e.id = new_card.id;
+  e.card_data = new_card;
+  var orientation = up ? 'up value-' + new_card.value + " " + new_card.suit : "down";
+
+  var cn = "drop-target card " + orientation;
+  e.className = cn + " hidden";
+
+  if (up) {
+    e.innerHTML = '<span class="top">' + new_card.value + '&' + new_card.suit + ';</span><span class="bottom">' + new_card.value + '&' + new_card.suit + ';</span>';
+    e.draggable = "true";
+    e.ondragstart = dragstart_handler;
+    e.ondblclick = auto_place;
+  }
+
+  target.appendChild(e);
+
+  // fade in
+  window.setTimeout(function() {
+    e.className = cn + " visible";
+  }, 100);
+
+  return e;
+}
+
+// double-click to put card on victory pile, if allowed.
+function auto_place(ev) {
+  ev.preventDefault();
+
+  // bleh. recursion
+  var card = ev.target;
+  while (!card.classList.contains('card')) {
+    card = card.parentNode;
+  }
+
+  var stacks = document.querySelectorAll('#known-knowns .blank.' + card.card_data.suit);
+  for (var i = 0; i < stacks.length; i++) {
+    var cards = stacks[i].querySelectorAll('.card');
+    var target = stacks[i];
+    if (cards && cards.length > 0) {
+      target = cards[cards.length-1];
+    }
+    if (card.card_data.intvalue - 1 == target.card_data.intvalue) {
+      target.appendChild(card);
+      flip_cards();
+      return true;
+    }
+  }
+}
+
+</script>
+
+<style>
+
+  #board, #top, #bottom {
+    position: relative;
+  }
+
+
+  #bottom {
+    top: 150px;
+    border: solid 1px red;
+  }
+
+  .card, .blank {
+    height: 120px;
+    width: 80px;
+    border: solid 1px #444;
+    display: inline-block;
+    margin: 0px;
+    position: relative;
+    border-radius: 6px;
+    padding: 0px;
+  }
+
+  .blank {
+    border-color: #eee;
+  }
+
+  .card {
+    font-weight: bold;
+    font-size: 24px !important;
+    box-shadow: 1px 1px 2px #444;
+    cursor: hand;
+    background-color: #eee;
+    position: relative;
+  }
+
+  .card span.top {
+    position: absolute;
+    top: 3px;
+    left: 6px;
+  }
+
+  .card span.bottom {
+    position: absolute;
+    top: 90px;
+    right: 5px;
+    transform:rotate(-180deg);
+  }
+
+  .hearts > span, .diams > span {
+    color: #a00;
+  }
+
+  .spades > span, .clubs > span {
+    color: #222;
+  }
+
+  .down {
+    background-color: #275D66;
+    border: solid 5px #ddd;
+    height: 112px;
+    width: 70px;
+    box-shadow: 0 0 0 1px #444;
+  }
+
+  body {
+    font-family: calibri, geneva, sans-serif;
+    background-color: #466024;
+  }
+
+  #unknown-unknowns, #known-unknowns, #known-knowns, #unknown-knowns {
+    margin: 5px 15px;
+    position: relative;
+  }
+
+  #unknown-knowns {
+    margin-top: 14px;
+    margin-bottom: 100px;
+    position: relative;
+  }
+
+  #unknown-knowns .blank {
+    margin: 0 2px;
+  }
+
+  #known-knowns .blank .back-symbol {
+    color: #eee;
+    font-size: 60px;
+    text-align: center;
+    line-height: 120px;
+    position: absolute;
+    width: 100%;
+    opacity: 0.4;
+  }
+
+  .card {
+    margin-left: -1px;
+    margin-top: -1px;
+  }
+
+  /** spread up cards enough to expose values **/
+  #unknown-knowns .blank .up .card {
+    margin-top: 28px;
+  }
+
+  #unknown-knowns .blank .card .down, #unknown-knowns .blank .down > .card {
+    margin-top: 8px;
+    margin-left: -5px;
+  }
+
+  #unknown-unknowns {
+     width: 130px;
+     height: 262px;
+  }
+
+  #stack {
+    top: 70px;
+    left: 24px;
+    text-align: center;
+    color: #ddd;
+  }
+
+  #stack span {
+    position: absolute;
+    top: 20px;
+    left: 0px;
+  }
+
+  #known-unknowns .blank {
+    border-style: dotted;
+    border-color: #999;
+  }
+
+  legend {
+    color: #eee;
+    font-size: 14px;
+    padding: 0 5px;
+  }
+
+  fieldset {
+    border-radius: 8px;
+    border-color: #eee;
+    border-width: 2px;
+    border-style: solid;
+  }
+
+  .visible {
+    opacity: 1;
+    transition: opacity 0.3s linear;
+  }
+
+  .hidden {
+    opacity: 0.5;
+  }
+</style>
+
+  </head>
+  <body onload="init_board();">
+    <div id="board">
+      <!-- YUP! IT'S A TABLE. When's the last time you saw that? Hell, when's the last time you saw an HTML comment meant for humans? -->
+      <table id="top">
+        <tr>
+          <td>
+            <fieldset id="unknown-unknowns">
+              <legend title="This is the deck to draw from when you are out of moves. Click to get a new card."><abbr >Unknown Unknowns</abbr></legend>
+              <div id="stack">
+                <div class="card down" onclick="draw_cards(event);"><span>Draw Cards</span></div>
+              </div>
+            </fieldset>
+          </td>
+          <td>
+            <fieldset id="known-unknowns">
+              <legend>Known Unknowns</legend>
+              <div>
+                <div id="ku-0" class="blank"></div>
+                <div id="ku-1" class="blank"></div>
+                <div id="ku-2" class="blank"></div>
+              </div>
+              <div>
+                <div id="ku-3" class="blank"></div>
+                <div id="ku-4" class="blank"></div>
+                <div id="ku-5" class="blank"></div>
+              </div>
+            </fieldset>
+          </td>
+          <td>
+            <fieldset id="known-knowns">
+              <legend>Known Knowns</legend>
+              <div>
+                <div id="kk-0" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&spades;</div></div>
+                <div id="kk-1" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&hearts;</div></div>
+                <div id="kk-2" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&clubs;</div></div>
+                <div id="kk-3" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&diams;</div></div>
+              </div>
+              <div>
+                <div id="kk-4" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&spades;</div></div>
+                <div id="kk-5" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&hearts;</div></div>
+                <div id="kk-6" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&clubs;</div></div>
+                <div id="kk-7" class="blank drop-target" ondrop="drop_handler(event);" ondragover="dragover_handler_kk(event);"><div class="back-symbol">&diams;</div></div>
+              </div>
+            </fieldset>
+          </td>
+        </tr>
+      </table>
+
+      <table id="unknown-knowns">
+        <tr>
+          <td><div id="uk-0" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-1" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-2" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-3" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-4" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-5" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-6" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-7" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-8" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+          <td><div id="uk-9" class="blank drop-target" ondrop="drop_handler(event, true);" ondragover="dragover_handler_uk(event);"></div></td>
+        </tr>
+      </table>
+    </div>
+  </body>
+</html>
